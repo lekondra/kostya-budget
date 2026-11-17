@@ -151,7 +151,7 @@ body[data-tab=home] #banner{display:none}
 <div class="ov" id="ov"><div class="sheet" id="sheet"></div></div>
 
 <script>
-/* Публичная версия: личных данных в коде нет, они загружаются из файла-копии («Ещё → Загрузить копию»). */
+/* Публичная версия: личных данных в коде нет, они приходят по ссылке или из файла-копии. */
 const KEY = 'kostya_budget_v1';
 
 /* ============ Помощники ============ */
@@ -331,6 +331,10 @@ function renderData(){
     Чтобы напоминания приходили и при закрытой странице, скачайте календарь и откройте файл на телефоне: за ${S.notifyDays} дн., за день и в день платежа в 9:00. Появились новые платежи — скачайте файл заново.</p>
     <div class="chips"><button class="chip" data-act="notify">${ICON.bell}Включить уведомления</button><button class="chip" data-act="ics">${ICON.cal}Скачать календарь</button></div>
     <p class="hint" id="notifyState" style="margin-top:10px"></p></div>
+  <div class="card"><b>Передать Косте</b>
+    <p class="hint">Заполните платежи, долги, зарплату и расходы у себя, затем скопируйте ссылку и отправьте Косте. Он откроет её, и всё подтянется. Его «Деньги сейчас» и записанные им траты не затрагиваются. Что-то изменилось — отправьте новую ссылку.</p>
+    <div class="chips"><button class="chip" data-act="sharelink">${ICON.plus}Скопировать ссылку для Кости</button></div>
+    <p class="hint" id="shareState" style="margin-top:10px"></p></div>
   <div class="card"><b>Резервная копия</b>
     <p class="hint">Данные хранятся только в этом браузере на этом устройстве. Сохраните копию, чтобы перенести их на другое устройство или не потерять при очистке браузера.</p>
     <div class="chips"><button class="chip" data-act="export">Скачать копию</button><button class="chip" data-act="importbtn">Загрузить копию</button></div><input type="file" id="file" accept=".json" style="display:none"></div>
@@ -365,6 +369,27 @@ function renderSheet(){
       <input id="dAmt" class="fld" inputmode="decimal" placeholder="Остаток, ₽">
       <button class="btn block" data-act="adddebt">Добавить</button>`;
   }
+}
+
+/* ============ Ссылка для передачи ============ */
+const b64e = s => btoa(unescape(encodeURIComponent(s))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
+const b64d = s => { s=s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; return decodeURIComponent(escape(atob(s))); };
+function shareLink(){
+  const {salary,advance,pct,notifyDays,categories,debts,payments}=S;
+  return location.href.split('#')[0]+'#d='+b64e(JSON.stringify({salary,advance,pct,notifyDays,categories,debts,payments}));
+}
+async function copyShare(){
+  const link=shareLink(), el=$('#shareState');
+  try{ await navigator.clipboard.writeText(link); el.textContent='Ссылка скопирована — отправьте её Косте в мессенджере.'; }
+  catch(e){ prompt('Скопируйте ссылку и отправьте Косте:',link); }
+}
+function importFromHash(){
+  const m=location.hash.match(/^#d=(.+)$/); if(!m) return;
+  try{
+    const p=JSON.parse(b64d(m[1]));
+    if(confirm('Загрузить платежи, долги и настройки из ссылки?\nТекущие платежи, долги и планы будут заменены. «Деньги сейчас» и записанные траты останутся.')){ Object.assign(S,p); save(); }
+  }catch(e){ alert('Ссылка повреждена или обрезана. Попросите отправить её заново.'); }
+  try{ history.replaceState(null,'',location.pathname+location.search); }catch(e){}
 }
 
 /* ============ Уведомления ============ */
@@ -446,6 +471,7 @@ document.addEventListener('click',ev=>{
     const kind=window._kind||'out'; S.ops.push({id:uid(),date:iso(today()),kind,cat:$('#opCat').value,note:$('#opNote').value.trim(),amount:amt});
     S.balance=num(S.balance)+(kind==='in'?amt:-amt); save(); closeSheet(); render(); return; }
   if(a==='delop'){ const o=S.ops.find(x=>x.id===el.dataset.id); if(o){ S.balance=num(S.balance)+(o.kind==='in'?-o.amount:o.amount); S.ops=S.ops.filter(x=>x!==o); save(); render(); } return; }
+  if(a==='sharelink'){ copyShare(); return; }
   if(a==='notify'){ askNotify(); return; }
   if(a==='ics'){ download('platezhi-kosti.ics',makeICS(),'text/calendar'); return; }
   if(a==='export'){ download('budget-kosti-'+iso(today())+'.json',JSON.stringify(S,null,1),'application/json'); return; }
@@ -453,7 +479,7 @@ document.addEventListener('click',ev=>{
   if(a==='reset'){ if(confirm('Стереть все изменения и вернуть исходные данные?')){ S=defaults(); save(); render(); } return; }
 });
 
-load(); render(); checkNotify();
+load(); importFromHash(); render(); checkNotify();
 setInterval(()=>{ renderBanner(); checkNotify(); }, 10*60*1000);
 document.addEventListener('visibilitychange',()=>{ if(!document.hidden){ render(); checkNotify(); } });
 </script>
