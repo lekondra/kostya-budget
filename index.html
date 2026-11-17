@@ -108,6 +108,10 @@ td{padding:7px 6px;border-bottom:1px solid var(--line)}
 td.n{text-align:right;white-space:nowrap}
 td.bal{font-weight:800;background:#fff3ea}
 td.bal.neg{background:var(--badbg)}
+tr.hist td{background:#f3f0f1;color:#6d6869}
+.hgrid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px 10px;align-items:center}
+.hgrid .mini-fld{text-align:right}
+.mini-fld.hole{background:#ffe8d6;border-radius:8px;padding:6px}
 .scroll{overflow-x:auto}
 
 /* banner (other tabs) */
@@ -181,7 +185,7 @@ const ICON={
 /* ============ Данные ============ */
 function defaults(){
   const d = {
-    balance:0, savings:0, pct:5, notifyDays:5, salary:0, advance:0,
+    balance:null, startBalance:0, history:[], savings:0, pct:5, notifyDays:5, salary:0, advance:0,
     categories:['Продукты','Рестораны','Транспорт','Вредные привычки','Развлечения и подарки','Связь (телефон, подписки)','Одежда, обувь, аксессуары','Гигиена и здоровье','Спорт','Иное','Коммуналка, бытовые нужды'].map(n=>({name:n,amount:0})),
     debts:[], payments:[], ops:[], notified:{}, sync:{url:'',token:''}
   };
@@ -189,7 +193,7 @@ function defaults(){
 }
 let S;
 function load(){
-  try{ const r=localStorage.getItem(KEY); if(r){ S=Object.assign(defaults(),JSON.parse(r)); return; } }catch(e){}
+  try{ const r=localStorage.getItem(KEY); if(r){ const o=JSON.parse(r); S=Object.assign(defaults(),o); if(!('history' in o)&&o.balance===0) S.balance=null; return; } }catch(e){}
   S=defaults();
 }
 function save(){ try{ localStorage.setItem(KEY,JSON.stringify(S)); }catch(e){} queueSync(); }
@@ -206,20 +210,39 @@ function dueList(){
 const urgent = () => dueList().filter(x=>x.d<=S.notifyDays);
 function when(d){ return d<0?`просрочено на ${-d} ${plural(-d,'день','дня','дней')}`:d===0?'СЕГОДНЯ':d===1?'завтра':`через ${d} ${plural(d,'день','дня','дней')}`; }
 
+const hasBal = () => S.balance!==null && S.balance!==undefined && S.balance!=='';
+function histRows(){
+  let bal=num(S.startBalance); const rows=[];
+  (S.history||[]).forEach(h=>{
+    const start=fromISO(h.start), end=start.getDate()<15?new Date(start.getFullYear(),start.getMonth(),14):eom(start);
+    const pays=S.payments.filter(p=>p.date).filter(p=>{const d=fromISO(p.date);return d>=start&&d<=end}).reduce((a,p)=>a+num(p.amount),0);
+    const income=num(h.income), daily=num(h.daily), net=income-daily-pays;
+    rows.push({hist:true,start,end,from:bal,income,daily,pays,save:0,to:bal+net}); bal+=net;
+  });
+  return rows;
+}
+const estBalance = () => { const h=histRows(); return h.length?h[h.length-1].to:0; };
 function forecast(){
-  const t=today(), rows=[]; let start=t, bal=num(S.balance), sav=num(S.savings);
+  const hist=histRows(), t=today(), rows=[];
+  const chainStart=hist.length?addDays(hist[hist.length-1].end,1):null;
+  const useBal=hasBal()||!hist.length;
+  let start=useBal?t:chainStart, bal=hasBal()?num(S.balance):estBalance(), sav=num(S.savings);
   for(let i=0;i<27;i++){
     const day=start.getDate();
     const hs = day<15 ? new Date(start.getFullYear(),start.getMonth(),1) : new Date(start.getFullYear(),start.getMonth(),15);
     const end = day<15 ? new Date(start.getFullYear(),start.getMonth(),14) : eom(start);
-    const income = i===0?0: day===1?num(S.salary): day===15?num(S.advance):0;
+    const income = (i===0&&useBal) ? 0 : day===1?num(S.salary): day===15?num(S.advance):0;
     const daily = monthlyExp()/2*(diff(start,end)+1)/(diff(hs,end)+1);
-    const pays = S.payments.filter(p=>!p.paid&&p.date).filter(p=>{const d=fromISO(p.date);return d<=end&&(i===0||d>=start)}).reduce((a,p)=>a+num(p.amount),0);
+    const pays = S.payments.filter(p=>p.date).filter(p=>{
+      const d=fromISO(p.date);
+      if(i===0) return useBal ? (!p.paid&&(!chainStart||d>=chainStart)&&d<=end) : (d>=start&&d<=end);
+      return !p.paid&&d>=start&&d<=end;
+    }).reduce((a,p)=>a+num(p.amount),0);
     const net=income-daily-pays, save=net>0?net*num(S.pct)/100:0;
     rows.push({start,end,from:bal,income,daily,pays,save,to:bal+net-save}); bal=bal+net-save; sav+=save;
     start=addDays(end,1);
   }
-  return rows;
+  return hist.concat(rows);
 }
 
 /* ============ Отрисовка ============ */
@@ -238,7 +261,7 @@ function renderBanner(){
     `<small>${u.map(x=>`${esc(x.p.name)} ${fmt(x.p.amount)} — ${when(x.d)}`).join(' · ')}</small>`;
 }
 function renderHome(){
-  const fc=forecast(), min=fc.reduce((m,r)=>r.to<m.to?r:m,fc[0]);
+  const fc=forecast().filter(r=>!r.hist), min=fc.reduce((m,r)=>r.to<m.to?r:m,fc[0]);
   const list=dueList(), u=urgent(), first=list[0];
   const now=new Date(), ym=now.getFullYear()+'-'+pad(now.getMonth()+1);
   const monthOps=S.ops.filter(o=>o.date.startsWith(ym));
@@ -251,7 +274,8 @@ function renderHome(){
   <div class="hero">
     <div class="hi">Привет,</div><div class="nm">Костя</div>
     <div class="bl">Деньги сейчас</div>
-    <input inputmode="decimal" placeholder="впишите сумму" data-f="balance" data-t="num" value="${num(S.balance)?esc(S.balance):''}">
+    <input inputmode="decimal" placeholder="${S.history&&S.history.length?'по таблице '+fmt(estBalance()):'впишите сумму'}" data-f="balance" data-t="numnull" value="${hasBal()?esc(S.balance):''}">
+    ${hasBal()?'':'<div class="bl" style="margin-top:6px">расчёт по таблице с 01.09 — впишите реальную сумму</div>'}
     <button class="glass ${u.length?'':'ok'}" data-act="tab" data-tab="obl"><span class="bd">${u.length||'✓'}</span><span>${u.length?`${u.length} ${plural(u.length,'платёж','платежа','платежей')} в ближайшие ${S.notifyDays} дн.`:`Платежей в ближайшие ${S.notifyDays} дн. нет`}</span><span class="ar">›</span></button>
   </div>
   <div class="float">
@@ -306,6 +330,12 @@ function renderObl(){
 }
 function renderPlan(){
   const fc=forecast();
+  const histCard = (S.history&&S.history.length) ? `<div class="card"><b>Прошлые периоды (факт)</b>
+    <div class="hint" style="margin:4px 0 8px">Перенесено из старой таблицы. Оранжевые поля там были пустыми — заполните. Платежи за эти периоды берутся из списка платежей.</div>
+    <div class="grid2" style="margin-bottom:8px"><span>Остаток на 01.09.2026</span><input class="mini-fld" inputmode="decimal" data-f="startBalance" data-t="num" value="${esc(S.startBalance)}"></div>
+    <div class="hgrid"><span class="hint">Период</span><span class="hint">Доход</span><span class="hint">Повседневные</span>
+    ${S.history.map((h,i)=>{const st=fromISO(h.start), en=st.getDate()<15?new Date(st.getFullYear(),st.getMonth(),14):eom(st);
+      return `<b>${ddmm(st)}–${ddmm(en)}</b><input class="mini-fld ${num(h.income)?'':'hole'}" inputmode="decimal" data-f="history.${i}.income" data-t="num" value="${esc(h.income)}"><input class="mini-fld ${num(h.daily)?'':'hole'}" inputmode="decimal" data-f="history.${i}.daily" data-t="num" value="${esc(h.daily)}">`}).join('')}</div></div>` : '';
   $('#plan').innerHTML=`
   <h2 class="page">План и прогноз</h2>
   <div class="card"><b>Доходы в месяц</b><div class="grid2" style="margin-top:8px">
@@ -317,10 +347,11 @@ function renderPlan(){
   <div class="card"><b>Настройки</b><div class="grid2" style="margin-top:8px">
     <span>В копилку, % свободных денег</span><input class="mini-fld" inputmode="decimal" data-f="pct" data-t="num" value="${esc(S.pct)}">
     <span>Напоминать за (дней)</span><input class="mini-fld" inputmode="numeric" data-f="notifyDays" data-t="num" value="${esc(S.notifyDays)}"></div></div>
-  <div class="sec">Прогноз по половинам месяца</div>
-  <div class="card"><div class="hint" style="margin-bottom:8px">От «Денег сейчас», плана и неоплаченных платежей. Первая строка — остаток текущей половины месяца.</div>
+  ${histCard}
+  <div class="sec">Периоды по половинам месяца</div>
+  <div class="card"><div class="hint" style="margin-bottom:8px">Серые строки — факт из старой таблицы, дальше прогноз. Если «Деньги сейчас» не указаны, прогноз идёт от расчётного остатка по таблице, иначе — от вписанной суммы с сегодняшнего дня.</div>
     <div class="scroll"><table><tr><th>Период</th><th>Старт</th><th>Доход</th><th>Траты</th><th>Платежи</th><th>Копилка</th><th>Конец</th></tr>
-    ${fc.map(r=>`<tr><td>${ddmm(r.start)}–${ddmmyy(r.end)}</td><td class="n">${fmt(r.from)}</td><td class="n">${fmt(r.income)}</td><td class="n">${fmt(r.daily)}</td><td class="n">${r.pays?fmt(r.pays):'–'}</td><td class="n">${r.save?fmt(r.save):'–'}</td><td class="n bal ${r.to<0?'neg':''}">${fmt(r.to)}</td></tr>`).join('')}
+    ${fc.map(r=>`<tr class="${r.hist?'hist':''}"><td>${ddmm(r.start)}–${ddmmyy(r.end)}${r.hist?' <span class="hint">факт</span>':''}</td><td class="n">${fmt(r.from)}</td><td class="n">${fmt(r.income)}</td><td class="n">${fmt(r.daily)}</td><td class="n">${r.pays?fmt(r.pays):'–'}</td><td class="n">${r.save?fmt(r.save):'–'}</td><td class="n bal ${r.to<0?'neg':''}">${fmt(r.to)}</td></tr>`).join('')}
     </table></div></div>`;
 }
 function renderData(){
@@ -384,8 +415,8 @@ function queueSync(){ if(!S||!S.sync||!S.sync.url) return; clearTimeout(syncTime
 async function doSync(manual){
   clearTimeout(syncTimer);
   if(!S.sync||!S.sync.url){ if(manual) alert('Сначала вставьте адрес веб-приложения из Apps Script'); return; }
-  const {balance,savings,pct,notifyDays,salary,advance,categories,debts,payments,ops}=S;
-  const body=JSON.stringify({token:S.sync.token,action:'sync',data:{balance,savings,pct,notifyDays,salary,advance,categories,debts,payments,ops}});
+  const {balance,savings,pct,notifyDays,salary,advance,categories,debts,payments,ops,history,startBalance}=S;
+  const body=JSON.stringify({token:S.sync.token,action:'sync',data:{balance,savings,pct,notifyDays,salary,advance,categories,debts,payments,ops,history,startBalance}});
   const hm=()=>{const n=new Date();return pad(n.getHours())+':'+pad(n.getMinutes())};
   setSyncState('Отправляю в таблицу…');
   try{
@@ -402,8 +433,8 @@ async function doSync(manual){
 const b64e = s => btoa(unescape(encodeURIComponent(s))).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
 const b64d = s => { s=s.replace(/-/g,'+').replace(/_/g,'/'); while(s.length%4) s+='='; return decodeURIComponent(escape(atob(s))); };
 function shareLink(){
-  const {salary,advance,pct,notifyDays,categories,debts,payments}=S;
-  return location.href.split('#')[0]+'#d='+b64e(JSON.stringify({salary,advance,pct,notifyDays,categories,debts,payments}));
+  const {salary,advance,pct,notifyDays,categories,debts,payments,history,startBalance}=S;
+  return location.href.split('#')[0]+'#d='+b64e(JSON.stringify({salary,advance,pct,notifyDays,categories,debts,payments,history,startBalance}));
 }
 async function copyShare(){
   const link=shareLink(), el=$('#shareState');
@@ -468,7 +499,7 @@ function download(name,text,type){
 
 /* ============ События ============ */
 function setPath(o,path,val){ const k=path.split('.'); let t=o; while(k.length>1) t=t[k.shift()]; t[k[0]]=val; }
-function setPaid(p,v){ if(!p||p.paid===v) return; p.paid=v; S.balance=num(S.balance)+(v?-1:1)*num(p.amount); save(); render(); }
+function setPaid(p,v){ if(!p||p.paid===v) return; p.paid=v; if(hasBal()) S.balance=num(S.balance)+(v?-1:1)*num(p.amount); save(); render(); }
 function setTab(t){
   document.querySelectorAll('section').forEach(s=>s.classList.toggle('on',s.id===t));
   document.querySelectorAll('.tabbar button').forEach(b=>b.classList.toggle('on',b.dataset.tab===t));
@@ -478,7 +509,7 @@ document.addEventListener('change',ev=>{
   const el=ev.target;
   if(el.dataset.act==='paid'){ setPaid(S.payments.find(x=>x.id===el.dataset.id),el.checked); return; }
   if(el.id==='file'){ const r=new FileReader(); r.onload=()=>{ try{ const keep=S.sync; S=Object.assign(defaults(),JSON.parse(r.result),{sync:keep}); save(); render(); alert('Копия загружена'); setTab('home'); }catch(e){ alert('Не получилось прочитать файл'); } }; r.readAsText(el.files[0]); return; }
-  if(el.dataset.f){ setPath(S,el.dataset.f,el.dataset.t==='num'?num(el.value):el.value); save(); render(); }
+  if(el.dataset.f){ setPath(S,el.dataset.f,el.dataset.t==='num'?num(el.value):el.dataset.t==='numnull'?(el.value.trim()===''?null:num(el.value)):el.value); save(); render(); }
 });
 document.addEventListener('click',ev=>{
   if(ev.target.id==='ov'){ closeSheet(); return; }
@@ -495,9 +526,10 @@ document.addEventListener('click',ev=>{
   if(a==='adddebt'){ const amt=num($('#dAmt').value); if(!amt||!$('#dName').value.trim()){ alert('Введите, кому должен, и сумму'); return; } S.debts.push({id:uid(),name:$('#dName').value.trim(),amount:amt,note:''}); save(); closeSheet(); render(); return; }
   if(a==='deldebt'){ const d=S.debts[el.dataset.i]; if(confirm('Удалить долг «'+d.name+'»?')){ S.debts.splice(el.dataset.i,1); save(); render(); } return; }
   if(a==='addop'){ const amt=num($('#opAmt').value); if(!amt){ alert('Введите сумму'); return; }
+    if(!hasBal()){ alert('Сначала впишите «Деньги сейчас» на главной — тогда операции будут менять остаток.'); closeSheet(); return; }
     const kind=window._kind||'out'; S.ops.push({id:uid(),date:iso(today()),kind,cat:$('#opCat').value,note:$('#opNote').value.trim(),amount:amt});
     S.balance=num(S.balance)+(kind==='in'?amt:-amt); save(); closeSheet(); render(); return; }
-  if(a==='delop'){ const o=S.ops.find(x=>x.id===el.dataset.id); if(o){ S.balance=num(S.balance)+(o.kind==='in'?-o.amount:o.amount); S.ops=S.ops.filter(x=>x!==o); save(); render(); } return; }
+  if(a==='delop'){ const o=S.ops.find(x=>x.id===el.dataset.id); if(o){ if(hasBal()) S.balance=num(S.balance)+(o.kind==='in'?-o.amount:o.amount); S.ops=S.ops.filter(x=>x!==o); save(); render(); } return; }
   if(a==='sysave'){ const url=$('#syUrl').value.trim(); if(!/^https:\/\/script\.google\.com\/.+/.test(url)){ alert('Адрес должен начинаться с https://script.google.com/ и заканчиваться на /exec'); return; }
     S.sync={url,token:$('#syTok').value.trim()}; save(); doSync(true); return; }
   if(a==='syoff'){ S.sync={url:'',token:''}; window._syncMsg='Синхронизация отключена.'; save(); render(); return; }
