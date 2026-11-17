@@ -183,7 +183,7 @@ function defaults(){
   const d = {
     balance:0, savings:0, pct:5, notifyDays:5, salary:0, advance:0,
     categories:['Продукты','Рестораны','Транспорт','Вредные привычки','Развлечения и подарки','Связь (телефон, подписки)','Одежда, обувь, аксессуары','Гигиена и здоровье','Спорт','Иное','Коммуналка, бытовые нужды'].map(n=>({name:n,amount:0})),
-    debts:[], payments:[], ops:[], notified:{}
+    debts:[], payments:[], ops:[], notified:{}, sync:{url:'',token:''}
   };
   return d;
 }
@@ -192,7 +192,7 @@ function load(){
   try{ const r=localStorage.getItem(KEY); if(r){ S=Object.assign(defaults(),JSON.parse(r)); return; } }catch(e){}
   S=defaults();
 }
-function save(){ try{ localStorage.setItem(KEY,JSON.stringify(S)); }catch(e){} }
+function save(){ try{ localStorage.setItem(KEY,JSON.stringify(S)); }catch(e){} queueSync(); }
 const TYPES=['Сплит','Кредитка','Кредит','Лена','Долг','Учёба','Другое'];
 
 /* ============ Расчёты ============ */
@@ -331,6 +331,12 @@ function renderData(){
     Чтобы напоминания приходили и при закрытой странице, скачайте календарь и откройте файл на телефоне: за ${S.notifyDays} дн., за день и в день платежа в 9:00. Появились новые платежи — скачайте файл заново.</p>
     <div class="chips"><button class="chip" data-act="notify">${ICON.bell}Включить уведомления</button><button class="chip" data-act="ics">${ICON.cal}Скачать календарь</button></div>
     <p class="hint" id="notifyState" style="margin-top:10px"></p></div>
+  <div class="card"><b>Синхронизация с Google Таблицей</b>
+    <p class="hint">Каждое изменение (платежи, долги, настройки, операции) сразу отправляется в таблицу. Включайте только на одном устройстве — там, где вы вводите данные: таблица обновляется со страницы, а не наоборот.</p>
+    <input id="syUrl" class="fld" autocomplete="off" placeholder="Адрес веб-приложения (https://script.google.com/macros/s/…/exec)" value="${esc((S.sync&&S.sync.url)||'')}">
+    <input id="syTok" class="fld" autocomplete="off" placeholder="Пароль (тот же, что TOKEN в скрипте)" value="${esc((S.sync&&S.sync.token)||'')}">
+    <div class="chips"><button class="chip" data-act="sysave">${ICON.cal}Сохранить и отправить</button><button class="chip" data-act="syoff">Отключить</button></div>
+    <p class="hint" id="syncState" style="margin-top:10px">${esc(window._syncMsg||'')}</p></div>
   <div class="card"><b>Передать Косте</b>
     <p class="hint">Заполните платежи, долги, зарплату и расходы у себя, затем скопируйте ссылку и отправьте Косте. Он откроет её, и всё подтянется. Его «Деньги сейчас» и записанные им траты не затрагиваются. Что-то изменилось — отправьте новую ссылку.</p>
     <div class="chips"><button class="chip" data-act="sharelink">${ICON.plus}Скопировать ссылку для Кости</button></div>
@@ -368,6 +374,27 @@ function renderSheet(){
       <input id="dName" class="fld" placeholder="Кому должен">
       <input id="dAmt" class="fld" inputmode="decimal" placeholder="Остаток, ₽">
       <button class="btn block" data-act="adddebt">Добавить</button>`;
+  }
+}
+
+/* ============ Синхронизация с таблицей (Apps Script) ============ */
+let syncTimer=null;
+function setSyncState(msg,bad){ window._syncMsg=msg; const el=$('#syncState'); if(el){ el.textContent=msg; el.style.color=bad?'#c62828':''; } }
+function queueSync(){ if(!S||!S.sync||!S.sync.url) return; clearTimeout(syncTimer); syncTimer=setTimeout(()=>doSync(false),1500); }
+async function doSync(manual){
+  clearTimeout(syncTimer);
+  if(!S.sync||!S.sync.url){ if(manual) alert('Сначала вставьте адрес веб-приложения из Apps Script'); return; }
+  const {balance,savings,pct,notifyDays,salary,advance,categories,debts,payments,ops}=S;
+  const body=JSON.stringify({token:S.sync.token,action:'sync',data:{balance,savings,pct,notifyDays,salary,advance,categories,debts,payments,ops}});
+  const hm=()=>{const n=new Date();return pad(n.getHours())+':'+pad(n.getMinutes())};
+  setSyncState('Отправляю в таблицу…');
+  try{
+    const r=await fetch(S.sync.url,{method:'POST',body,redirect:'follow'});
+    const j=await r.json();
+    setSyncState(j.ok?`Таблица обновлена в ${hm()}: платежей ${j.payments}, долгов ${j.debts}, операций ${j.ops}`:'Таблица не обновлена: '+j.error, !j.ok);
+  }catch(e){
+    try{ await fetch(S.sync.url,{method:'POST',body,mode:'no-cors'}); setSyncState(`Отправлено в ${hm()}, но подтверждение прочитать не удалось — откройте таблицу и проверьте.`); }
+    catch(e2){ setSyncState('Не удалось отправить: нет связи или неверный адрес.',true); }
   }
 }
 
@@ -450,7 +477,7 @@ function setTab(t){
 document.addEventListener('change',ev=>{
   const el=ev.target;
   if(el.dataset.act==='paid'){ setPaid(S.payments.find(x=>x.id===el.dataset.id),el.checked); return; }
-  if(el.id==='file'){ const r=new FileReader(); r.onload=()=>{ try{ S=Object.assign(defaults(),JSON.parse(r.result)); save(); render(); alert('Копия загружена'); setTab('home'); }catch(e){ alert('Не получилось прочитать файл'); } }; r.readAsText(el.files[0]); return; }
+  if(el.id==='file'){ const r=new FileReader(); r.onload=()=>{ try{ const keep=S.sync; S=Object.assign(defaults(),JSON.parse(r.result),{sync:keep}); save(); render(); alert('Копия загружена'); setTab('home'); }catch(e){ alert('Не получилось прочитать файл'); } }; r.readAsText(el.files[0]); return; }
   if(el.dataset.f){ setPath(S,el.dataset.f,el.dataset.t==='num'?num(el.value):el.value); save(); render(); }
 });
 document.addEventListener('click',ev=>{
@@ -471,10 +498,13 @@ document.addEventListener('click',ev=>{
     const kind=window._kind||'out'; S.ops.push({id:uid(),date:iso(today()),kind,cat:$('#opCat').value,note:$('#opNote').value.trim(),amount:amt});
     S.balance=num(S.balance)+(kind==='in'?amt:-amt); save(); closeSheet(); render(); return; }
   if(a==='delop'){ const o=S.ops.find(x=>x.id===el.dataset.id); if(o){ S.balance=num(S.balance)+(o.kind==='in'?-o.amount:o.amount); S.ops=S.ops.filter(x=>x!==o); save(); render(); } return; }
+  if(a==='sysave'){ const url=$('#syUrl').value.trim(); if(!/^https:\/\/script\.google\.com\/.+/.test(url)){ alert('Адрес должен начинаться с https://script.google.com/ и заканчиваться на /exec'); return; }
+    S.sync={url,token:$('#syTok').value.trim()}; save(); doSync(true); return; }
+  if(a==='syoff'){ S.sync={url:'',token:''}; window._syncMsg='Синхронизация отключена.'; save(); render(); return; }
   if(a==='sharelink'){ copyShare(); return; }
   if(a==='notify'){ askNotify(); return; }
   if(a==='ics'){ download('platezhi-kosti.ics',makeICS(),'text/calendar'); return; }
-  if(a==='export'){ download('budget-kosti-'+iso(today())+'.json',JSON.stringify(S,null,1),'application/json'); return; }
+  if(a==='export'){ download('budget-kosti-'+iso(today())+'.json',JSON.stringify(Object.assign({},S,{sync:{url:'',token:''}}),null,1),'application/json'); return; }
   if(a==='importbtn'){ $('#file').click(); return; }
   if(a==='reset'){ if(confirm('Стереть все изменения и вернуть исходные данные?')){ S=defaults(); save(); render(); } return; }
 });
